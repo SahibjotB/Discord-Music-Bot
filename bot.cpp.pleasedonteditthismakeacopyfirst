@@ -1,0 +1,290 @@
+#include <dpp/dpp.h>
+#include <nlohmann/json.hpp>
+#include <fmt/format.h>
+#include <iomanip>
+#include <sstream>
+#include <Python.h> 
+#include <vector>
+#include <fstream>
+#include <iostream>
+#include <mpg123.h>
+#include <out123.h>
+#include <queue>
+
+/* For an example we will hardcode a path to some awesome music here */
+#define MUSIC_FILE "song.mp3"
+
+std::queue<std::string> songs;
+std::queue<std::string> tempQ;
+dpp::voiceconn* v;
+
+std::string downloadSong(const char url[]){
+
+		   setenv("PYTHONPATH",".",1);
+		   
+		   PyObject *pName, *pModule, *pDict, *pFunc, *pValue, *presult;
+		   
+		   
+		   
+		   Py_Initialize();
+		   
+		   
+                   // Build the name object
+                   pName = PyUnicode_FromString((char*)"youtubeDownloader");
+		   
+                   // Load the module object
+                   pModule = PyImport_Import(pName);
+		   
+		   
+                   // pDict is a borrowed reference 
+                   pDict = PyModule_GetDict(pModule);
+		   
+		   printf("before function");
+		   fflush(stdout);
+                   // pFunc is also a borrowed reference 
+                   pFunc = PyDict_GetItemString(pDict, (char*)"download");
+	   
+                   if (PyCallable_Check(pFunc)){
+                   	printf("good stuff\n");
+			pValue=Py_BuildValue("(z)",(char*)url);
+                   	PyErr_Print();
+                   	printf("Let's give this a shot!\n");
+                   	presult=PyObject_CallObject(pFunc,pValue);
+                   	PyErr_Print();
+                   } 
+		   else{
+			printf("bad stuff\n");
+                        PyErr_Print();
+                   }
+		    
+	           //printf("Result is %d\n",PyInt_AsLong(presult));
+                   Py_DECREF(pValue);
+		   
+		   Py_DECREF(pModule);
+		   Py_DECREF(pName);
+		   // Finish the Python Interpreter
+		   Py_Finalize();
+		   
+		   std::string s(PyUnicode_AsUTF8(presult));
+		   printf("after everything");
+		   fflush(stdout);
+		   return s;
+			
+}
+
+std::vector<uint8_t> loadSong(int index){
+	
+	std::vector<uint8_t> pcmdata;
+	int err = 0;
+    	unsigned char* buffer;
+    	size_t buffer_size, done;
+    	int channels, encoding;
+    	long rate;
+
+	std::string songToPlay;
+	std::string lastSong;
+	int qsize = songs.size();
+	bool songFound = false;
+	for (int i=0;i<qsize;i++){
+			
+		lastSong = songs.front();
+		songs.pop();
+		
+		if(!(i == index)){
+			songs.push(lastSong);
+		}
+		else{
+			songToPlay = lastSong;
+			songFound = true;
+		}
+		
+	}
+
+    	/* Note it is important to force the frequency to 48000 for Discord compatibility */
+    	mpg123_handle *mh = mpg123_new(NULL, &err);
+    	mpg123_param(mh, MPG123_FORCE_RATE, 48000, 48000.0);
+ 
+    	/* Decode entire file into a vector. You could do this on the fly, but if you do that
+    	* you may get timing issues if your CPU is busy at the time and you are streaming to
+    	* a lot of channels/guilds.
+    	*/
+    	buffer_size = mpg123_outblock(mh);
+    	buffer = new unsigned char[buffer_size];
+ 
+    	/* Note: In a real world bot, this should have some error logging */
+    	mpg123_open(mh, songToPlay.c_str());
+    	mpg123_getformat(mh, &rate, &channels, &encoding);
+ 
+    	unsigned int counter = 0;
+   	for (int totalBytes = 0; mpg123_read(mh, buffer, buffer_size, &done) == MPG123_OK; ) {
+        	for (auto i = 0; i < buffer_size; i++) {
+            		pcmdata.push_back(buffer[i]);
+        	}
+        	counter += buffer_size;
+        	totalBytes += done;
+    	}
+    	delete buffer;
+    	mpg123_close(mh);
+    	mpg123_delete(mh);
+	
+	return pcmdata;
+
+}
+
+
+
+/* 
+ * Starter code was derived from https://dpp.dsv/joinvc.html
+*/
+
+int main(int argc, char const *argv[]) {
+
+    	/* This will hold the decoded MP3.
+    	* The D++ library expects PCM format, which are raw sound
+    	* data, 2 channel stereo, 16 bit signed 48000Hz.
+    	*/
+    	
+	std::vector<uint8_t> pcmdata;
+ 
+    	mpg123_init();
+ 
+ 
+    	/* Setup the bot */
+    	dpp::cluster bot("MTA4MjY5OTQ2MjM2MDcwMzEzOQ.GmKGHq.ubm7ZSHfZZAYiDCPs-Hw3JJhYB0Mb1QNgy5UyM", dpp::i_default_intents | dpp::i_message_content);
+ 
+        bot.on_log(dpp::utility::cout_logger());
+ 
+	
+    	/* Use the on_message_create event to look for commands */
+    	bot.on_message_create([&bot, &pcmdata](const dpp::message_create_t & event) {
+
+        std::string ss(event.msg.content);
+       	std::string command = ss;
+	std::istringstream iss(command);
+	std::string token;
+
+	std::cout << command << std::endl;
+
+	std::getline(iss, token, ' ');
+	
+        std::string display = "";
+ 	std::string lastSong;
+	int qsize;
+	int delNum;
+
+        /* Tell the bot to join the discord voice channel the user is on. Syntax: .join */
+        if (token == ".join") {
+            	dpp::guild * g = dpp::find_guild(event.msg.guild_id);
+            	if (!g->connect_member_voice(event.msg.author.id)) {
+                	bot.message_create(dpp::message(event.msg.channel_id, "You don't seem to be on a voice channel! :("));
+		}
+            	v = event.from->get_voice(event.msg.guild_id);
+        }
+ 
+        /* Tell the bot to play the mp3 file. Syntax: .mp3 */
+        if (token == ".play") {
+		
+	    	std::getline(iss, token, ' ');
+	    	token = downloadSong(token.c_str());
+		songs.push(token);
+		
+		if(songs.size() == 1 && !(v->voiceclient->is_playing())){
+			pcmdata = loadSong(0);
+            		if (v && v->voiceclient && v->voiceclient->is_ready()) {
+                		/* Stream the already decoded MP3 file. This passes the PCM data to the library to be encoded to OPUS */
+                		v->voiceclient->send_audio_raw((uint16_t*)pcmdata.data(), pcmdata.size());
+            		}
+		}
+        }
+
+	// Disconnects discord bot from server
+	if (token == ".disconnect") {
+	    	event.from->disconnect_voice(event.msg.guild_id);
+	}
+
+	// Adds song to end of queue
+	if (token == ".add"){
+	    	std::cout << "Add command: " << command << std::endl;
+	    	std::getline(iss, token, ' ');
+		token = downloadSong(token.c_str());
+	    	songs.push(token);
+	}
+	
+	// Displays current queue
+	if (token == ".view"){
+		qsize = songs.size();
+	   
+		for(int i = 0; i < qsize; i++){
+			display = display + songs.front() + "\n";
+	  		lastSong = songs.front();
+			songs.pop();
+			songs.push(lastSong);
+		
+	   	}
+	   	dpp::message msg(event.msg.channel_id, display);
+	   	bot.message_create(msg);
+	   	display = "";
+	}
+
+	//this skips the next song
+	if (token == ".next"){
+		
+		if(v->voiceclient->is_playing()){
+			v->voiceclient->stop_audio();
+		}	
+		pcmdata = loadSong(0);
+            	if (v && v->voiceclient && v->voiceclient->is_ready()) {
+                	/* Stream the already decoded MP3 file. This passes the PCM data to the library to be encoded to OPUS */
+                	v->voiceclient->send_audio_raw((uint16_t*)pcmdata.data(), pcmdata.size());
+		}
+	}
+
+	// Adds song to front of queue
+	if (token == ".addFront"){
+
+	    	qsize = songs.size();
+	   
+	    	std::getline(iss, token, ' ');
+	    
+	    	for(int i = 0; i < qsize; i++){
+	  		lastSong = songs.front();
+			songs.pop();
+			tempQ.push(lastSong);
+		}
+		
+		songs.push(token);
+	    
+ 		for(int i=0;i<qsize; i++){
+			songs.push(tempQ.front());
+			tempQ.pop();
+		}
+	}
+	
+	// Deletes specified song by its ID
+	if (token == ".delete"){
+		qsize = songs.size();
+		std::getline(iss, token, ' ');
+		delNum = stoi(token);
+
+		for (int i=0;i<qsize;i++){
+			
+	  		lastSong = songs.front();
+			songs.pop();
+
+			if(!(i+1 == delNum)){
+				songs.push(lastSong);
+			}
+
+		}
+	}
+    });
+ 
+    /* Start bot */
+    bot.start(dpp::st_wait);
+ 
+    /* Clean up */
+    mpg123_exit();
+ 
+    return 0;
+}
+
